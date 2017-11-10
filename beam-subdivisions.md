@@ -63,6 +63,8 @@ I think the first step should be to determine the *positions* of subdivisions an
 * This separation adds another situation that has not been possible so far: the beat length may not be a multiple of the subdivision length. In the above example the third beat is 5/32 long. So when we subdivide by 1/8 or 1/16 the division doesn't fit into the beat without remainder. In this case the beat can't be subdivided at all. This has to be determined for each beat in the processing outlined below.
 * Separating `baseMoment` from subdivision length also makes it possible to provide reasonable presets for subdivisions in the `beamExceptions` for a given time signature. In fact I think this should be added, both as a property and to all defined preset time signatures.
 * If it is reasonably possible to implement the most natural way would be to use `subdivideBeams` for this. `\set subdivideBeams = 1/8` would then both switch the subdivision on and set the value. I'd say `\set subdivideBeams = 0` would then switch it off. That would also lend itself nicely to the `if` condition in C++.
+* Independently from how the subdivision interval is stored internally a practical interface would be a function
+    `subdivideBeams = #(define-void-function (ctx interval)((symbol? 'Score) moment-or-boolean?) ... )`. This makes it easy to switch subdivision on and off and at the same time define the interval. The optional `ctx` can limit the scope to specific contexts.
 
 ##### How to do this in general (i.e. no tuplets involved)
 
@@ -73,7 +75,7 @@ I think the first step should be to determine the *positions* of subdivisions an
   Optionally it may make sense to store the information also in the stem to the left.
 * The nominal beam count for the subdivision can be calculated by `intlog2(rhythmic_imporance) - 2`, which is true for the left beamlets of the current stem and the right beamlets of the previous stem.
 * The position *on* the beat (determined by getting a Moment of 0 (I don't know what denominator the `Moment` object will then assume)) needs special consideration. In this case the rhythmic importance is determined by the *length* of the beat.  
-**TODO:** Reconsider this. In regular settings the
+**TODO:** Reconsider this. In regular settings the  
 For regular beats this is pretty clear (e.g. a beat of 1/8 has an importance of 8). But for example, when 5/32 are grouped in 2+3 (baseMoment = 1/32, beatStructure = 2,3) the lengths of the beats are 2/32 (= 1/16) and 3/32. For both beats we will want a rhythmic importance of 1/16 (= 2 beams) because they are `>= 1/16 < 1/8`.  
   To achieve that we shorten the fraction by 2 (and flooring the numerator each time) until the numerator becomes 1. The most efficient way to do that in a loop where both numerator and denominator are shifted right until the numerator is 1.
 
@@ -127,32 +129,66 @@ Essentially when encountering a tuplet this has to be handled independently (see
 
 ##### Handling Tuplets
 
-It has been seen that tuplets can not be handled by simply translating their positions. But also we can't simply treat them as modified beats either, we also have to take into account their internal *grouping*, depending on the `tupletSpannerDuration` (**NOTE**: I don't know where we can read this from in C++).
+OK, tuplets can't be simply translated to their stem's absolute positions in the measure, but what is the reference then? I have come to the conclusion that we have to consider them in slices of their `tupletSpannerDuration` (**NOTE**: I don't know where we can get this information from in C++).
 
-![Different groupings depending on tupletSpannerDuration](images/grouped-tuplets.png)
+Figure \ref{grouped-tuplets} shows `\repeat unfold 12 c32` with `\tupletSpan`s of 1/4 (default), 1/8, and 1/16.
 
-Beam subdivisions follow this grouping. The division of the first by 1/8 has been shown above, with a subdivision of 1/16 it would look like this:
+![Different groupings depending on `tupletSpannerDuration`\label{grouped-tuplets}](images/grouped-tuplets.png)
 
-![Triplet of length 1/4, subdivided with 1/16](images/triplet-grouping-1.png)
+Beam subdivisions follow this grouping.
 
-while with a tuplet span of 1/8 it would be
+The combination of the default tuplet span of 1/4 with a division by 1/8 has already been shown above (fig. \ref{triplets-correct-subdivision}):
 
-![Triplet of length 1/8, subdivided by 1/16](images/triplet-grouping-2.png)
+![Triplet of length 1/4, subdivided by 1/8\label{triplets-correct-subdivision}](images/triplets-correct-subdivision.png)
 
-In the third example the triplets wouldn't be divided internally, only at their borders (which happens to be the only example that is currently rendered correctly by default):
+With subdivisions by 1/16 it should look like fig. \ref{triplet-grouping-1}:
 
-![Triplet of length 1/16, subdivided by 1/16](images/triplet-grouping-3.png)
+![Triplet of length 1/4, subdivided with 1/16\label{triplet-grouping-1}](images/triplet-grouping-1.png)
 
-So what we need to do is treat the tuplet as a beatStructure determined by the tuplet fraction and the tupletSpannerDuration:
+Changing the tuplet span to 1/8 should not only change the tuplet spanner grouping but also the beaming (fig. \ref{triplet-grouping-2}):
 
-* One *beat* is tupletSpannerDuration * tuplet long, and the *baseMoment* is a beat divided by the numerator of the tuplet number:
-    * In the first example tupletSpannerDuration is 1/4, the tuplet is 3/2. So a beat is `1/4 * 3/2 = 3/8`, and the baseMoment is `3/8 / 3 = 1/8`. In this example the beam has only one beat.
-    * In the second example tupletSpannerDuration is 1/8. A beat is `1/8 * 3/2 = 3/16`, and the baseMoment is `3/16 / 3 = 1/16`.
-    * In the last example tupletSpannerDuration is 1/16. A beat is `1/16 * 3/2 = 3/32`, and the baseMoment is `3/32 / 3 = 1/32`. As the beat length of 3/32 is not a multiple of 1/16, our subdivision length, the triplets are not subdivided anymore. However, the first note of each sub-triplet represents a new beat and can therefore be subdivided
+![Triplet of length 1/8, subdivided by 1/16\label{triplet-grouping-2}](images/triplet-grouping-2.png)
 
+When changing tuplet span to 1/16 the triplets are not subdivided anymore, (this happens to be the only example that is currently rendered correctly by default). However, note how subdivisions occur at the borders of the triplet spans (fig. \ref{triplet-grouping-3}):
+
+![Triplet of length 1/16, subdivided by 1/16\label{triplet-grouping-3}](images/triplet-grouping-3.png)
+
+
+*Interpretation:*
+
+* A tuplet is split into parts of the length of `tupletSpannerDuration`. As far as beaming-pattern is concerned any tuplet has to be treated as a sequence of tuplets that have to be processed one after another.
+* The *first* stem in each tuplet is treated like a regular stem outside of the tuplet. This means it is necessary to know the absolute position in the `beatStructure` *(I'm not sure if the position has already been calculated when `beamify` is executed)*.
+* Each tuplet span is processed individually like a single beat. Its length corresponds to the *visual* representation (`tupletSpannerDuration * tuplet fraction`), so for example a 3/2 tuplet over a span of 1/8 results in a “beat” of 3/16. The `baseMoment` for this beat is determined by the virtual beat length divided by the numerator of the tuplet fraction, in the given example `3/16 / 3 = 1/16`
+* As stated above subdivisions may only occur when the beat length is a multiple of the subdivision length (recall that this is not identical to `baseMoment` anymore). When in the given example a subdivision of 1/8 is requested the triplet won't be subdivided anymore since 3/16 is not a multiple of 1/8.
+
+
+##### Tuplets That Can Be Shortened
+
+Sometimes tuplet fractions are used that can be shortened, for example 6/4. As far as I can see this doesn't make any difference for regular beams, but it should do so when it comes to subdivisions. The above example with a tuplet fraction of 6/4, a tuplet span of 1/4, and subdivisions of 1/16 should be beamed exactly like with a 3/2 tuplets spanning 1/8 (fig. \ref{shorten-tuplets}). With a tuplet of 12/8 the result should match a tuplet span of 1/16 (fig. \ref{shorten-tuplets-12-8})
+
+![6/4 tuplets, beamed like in fig. \ref{triplet-grouping-2}, but with different tuplet number\label{shorten-tuplets}](images/shorten-tuplets.png)
+
+![12/8 tuplets, beamed like in fig. \ref{triplet-grouping-3}, but with different tuplet number\label{shorten-tuplets-12-8}](images/shorten-tuplets-12-8.png)
+
+* Before a tuplet is split into its `tupletSpannerDuration` slices it has to be checked whether the tuplet fraction can be shortened.
+    * while numerator(tuplet) is odd:
+        * shorten tuplet fraction by 2
+        * expand tupletSpannerDuration by 2
+* A `\tuplet 6/4 4` should be resolved to two `\tuplet 3/2 8`, for example, `\tuplet 12/8 4` to four `\tuplet 3/2 16`.
+* Note that this operation *only* applies to the calculation of beam subdivisions, any other aspect of tuplet processing is not affected.
+
+##### Nested Tuplets
+
+Nested tuplets should be treated conceptually just like regular tuplets: any subdivision consideration is done relative to the visual representation, regardless of the absolute position in the measure (fig. \ref{nested-tuplets})
+
+![Nested tuplets. The subdivisions apply to the *visual* representation and don't care about position in the measure\label{nested-tuplets}](images/nested-tuplets.png)
+
+When encountering a nested tuplet the inner tuplet is set aside and processed just like a regular tuplet, just not relative to the overall beam/measure but to the enclosing tuplet.
+
+Maybe it makes sense to consider a tuplet as an “inner measure” and create an object similar to a new beaming-pattern. That way one wouldn't have to worry about nested tuplets and have them recurse automatically. But I haven't thought about how to best *implement* this, currently I'm exclusively thinking about the musical concepts.
 
 #### Calculating Actual Beamlet Counts
 
 What we have by now is each stem's actual duration and regular beam count. Additionally we have identified stems to the right of subdivisions together with their nominal beam count. However, the actual number of beams printed to the right and left of a stem may vary depending on several factors such as the beam count of the stems to the right and left, shortened stems and the property `strictBeatBeaming`.
 
-I have not looked into this topic yet, but maybe it's possible to simply reuse the current logic and (partially) code for that anyway.
+I have not looked into this topic yet, but maybe it's possible to simply reuse the current logic and (partially) code for that anyway. In any case the topics so far should be fixed before proceeding with the finalization stage.
