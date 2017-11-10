@@ -6,36 +6,34 @@ documentclass: scrartcl
 classoption: "DIV=12"
 ---
 
-This document describes reconsiderations to the reimplementation of LilyPond's beaming-pattern code to finally get proper beam subdivisions. In January 2016 I had already worked on the topic but failed to complete it, re-reading the code now seems to suggest a new approach based on a proper *conceptual* assessment.
+In January 2016 I worked on the code which is responsible for beaming patterns in [GNU LilyPond](http://lilypond.org). This is the code that decides how many beams any given stem gets within a beamed group - the decision *which* notes to beam has already been taken when the beaming *pattern* is calculated.
 
-The old work can be found in the `dev/urs/beaming-pattern` branch, and specifically up to commit `6610d2faa4782d3414686b63ba622c354bbce9bb` (Jan 26, 2016), later commits are merely merge commits to keep the branch in sync with later development. However, I suggest *not* to continue working on that branch but to restart from scratch on a new branch.
+Before that I had repeatedly complained about errors in beam *subdivisons*. Several fixes had been made upon my request, and it turned out that there were always cases that produced yet another wrong result, triggering new bug reports and new patches. So I intended to go into depth and fix it properly. Unfortunately I couldn't finish that back then because it was somewhat over my head.
 
-Most of the relevant code is in `lily/beaming-pattern.cc` and `lily/include/beaming-pattern.hh`, and this document is based on a re-reading of these files.
+Re-reading code both from the `master` branch and my working branch (the relevant code is mainly in `lily/beaming-pattern.cc`) made me realize that - while intending to dig deeper - I essentially made the same mistake that is present throughout the released code: I tried to fix one issue and then looked for further problems. Essentially the beaming pattern code places patches on top of patches, while the basic outline of the algorithm gets very much blurred.
+
+The conclusion is to start from scratch by assessing the topic from a *conceptual* perspective. It is essential to know how beaming patterns behave musically and mathematically, and only then it makes sense to design a strategy/algorithm and think about the implementation. It turns out that often fixing/patching corner and special cases can be avoided by changing the reference point in the first place. This conceptual assessment is the purpose of this document.
+
+The most fundamental aspect is rethinking in what order information will be processed. My impression is that the existing code sometimes calculates values (e.g. flag directions) and later has to touch that information again.
+
+Maybe this convolution of the code is related to two processing stages not being sufficiently isolated. At first *nominal* beam counts have to be calculated for each stem by identifying subdivision points and determine their metric relevance. Only then the actual number of beamlets printed to the left and right side of the stem should be considered, taking all further aspects (count of neighboring stems, single flags, trailing rests etc.) into account.
+
+The old work can be found in the `dev/urs/beaming-pattern` branch, and specifically up to commit `6610d2faa4782d3414686b63ba622c354bbce9bb` (Jan 26, 2016), later commits are merely merge commits to keep the branch in sync with later development. However, I suggest *not* to continue working on that branch but to restart from scratch on a new branch. With regard to the actual *implementation* I suggest not to modify the existing code but to start that from scratch too while trying to reuse existing code where appropriate.
+
+
 
 ## General Observations
 
-Before going into any detail I want to state a few observations made from comparing the code in `master` with that in my working branch, considering what I tried to do last year and re-evaluating what the existing code tries to do.
+I can see three musical problems with beaming pattern in the current implementation:
 
-### Coding
+* Beam subdivisions should be *on* by default.  
+  Actually this isn't an error, but a feature request, and maybe a controversial one (given the implications on existing scores). But note that Elaine Gould confirmed that beams should be subdivided by default (“YES absolutely, (c) as default. Look how easy the rhythms are to read in comparison with the other examples!”).
+* Shortened beams cause subdivisions in the last beat of a beam to have too many beams. This is wrong but actually done on purpose. Dorico currently does the same, and, by the way, the text in Gould (p. 156/157) is ambiguous because it lacks an example for this case. But she confirmed that beam shortening should not affect the beam count at subdivisions.
+* The handling of tuplets is totally messed up.
 
-Generally speaking I think the code is quite convoluted and probably the result of numerous attempts at patching and fixing. It definitely needs a reimplementation rather than even further patches, and I *hope* it can be made substantially more straightforward.
+I am not sure to what extent the handling of the finer details (treatment of different note values (flags), single beams at a subdivision, shortened beams and rests) are currently treated correctly, but I think we should think this from the ground up and see *then* how these details work and have to be implemented.
 
-The most fundamental aspect is rethinking in what order information will be processed. My impression is that the existing code sometimes calculates values (such as flag direction) and later has to touch that information again. The goal should be to avoid such inefficient and confusing behaviour as much as possible. For example flag directions should be determined as late as possible.
-
-Maybe this convolution is related to the two layers of basic beaming pattern (with subdivisions) and specific cases such as incomplete beams, internal rests etc. So my approach (at least in this document) is to first come up with a basic structure and then handle the specifics. Of course it has to be seen if that approach can be applied to implementation or if that would cause its own level of convolution.
-
-### Musical Concepts
-
-I can see three musical problems of the basic beaming pattern in the current implementation:
-
-* Beam subdivisions should be on by default.  
-  (well, actually this isn't an error, but a feature request, and it should be discussed. But note that Elaine Gould confirmed that this *should* be the default, and Dorico does it by default, too.)
-* Shortened beams cause a wrong number of beams within the last beat. This is due to an explicit (and - wrongly - intended) check in the code. The basis for the calculation of the beam count is the remaining length of the beam, while actually trailing unbeamed rests should also be taken into account.
-* The handling of tuplets is totally messed up. It is wrong to consider stems within tuplets by their absolute metric position.
-
-I am not sure to what extent the handling of the finer details (treatment of different note values (flags), single beams at a subdivision, shortened beams and rests) are currently treated correctly, but I think we should think this from the ground up and see *then* how these details work and have to be implemented
-
-### Approach
+## Analysis
 
 #### Determine Subdivisions First
 
