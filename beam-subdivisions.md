@@ -58,7 +58,7 @@ It is obvious that a new property `subdivisionInterval` has to be created that i
   \compoundMeter #'((2 4) (5 32))
   \set baseMoment = #(ly:make-moment 1/32)
   \set beatStructure = #'(8 8 2 3)
-  \subdivideBeams 1/16
+  \subdivideBeams 16
   \repeat unfold 16 a32
   \repeat unfold 5 a32
 }
@@ -81,34 +81,27 @@ Separating `baseMoment` from `subdivisionInterval` has another implication that 
 
 
 
-#### General Identification of Subdivisions - `beamify` (Without Tuplets)
+#### General Identification of Subdivisions - `subdivide()` (Without Tuplets)
 
-This section describes the process of determining the nominal beam count for all stems in a beam when no tuplets are involved. The specifics of dealing with tuplets are discussed in the next section, while all further considerations regarding the actual *printed* left and right beamlets are discussed in a later part.
+This section describes the process of determining the nominal beam count for all stems in a beam when no tuplets are involved. The specifics of dealing with tuplets are discussed in the next section, while all further considerations regarding the actual *printed* left and right beamlets are discussed in a later part. It partly reproduces the existing method `Beaming-pattern::beamify()` and should be implemented as a new function `Beaming-pattern::subdivide()` which is called from `beamify`.
 
-##### Some notes:
+For each stem we determine the position (Moment) relative to the current *beat*. We can't work with the position relative to the *measure*, since that may produce wrong results in some cases. For example in a 5/32+2/4 time (the opposite of the compound time in the previous example) all the positions in the 2/4 part would be “off” the grid by 1/32.
 
-* The remaining length of the beam should *never* be considered (as is currently in LilyPond (and also Dorico)). When a stem is shortened by rests the number of beams at prior subdivisions should *not* be increased.
-* Also we don't want to use the *absolute* position in the *measure*, since that may confuse the calculation with compound meters with differing denominators. Instead we always want to calculate the rhythmic importance relative to the current *beat*. (see code example after next item)
+The property from which we can determine whether a stem is at a subdivision is its `rhythmic_importance`. This is simply the denominator of the `Moment` obtained in the previous step. For example the moments of eight 32th notes in a quarter are `0/1` (or 0) -- `1/32` -- `1/16` -- `3/32` -- `1/8` -- `5/32` -- `3/16` -- `7/32`, and the corresponding values for `rhythmic_importance` are 1, 32, 16, 32, 8, 32, 16, 32. This works because LilyPond's `Moment` class automatically shortens its fraction *(the denominator of any Moment with numerator 0 is 1).*
 
----
+A stem represents a subdivision when its rhythmic importance is less than or equal to the subdivision interval. In this case the subdivision occurs to the left of the current stem. *(NOTE: this may not work properly when we allow subdivision intervals other than 1/x.)*
 
-* Iterate over the whole beam
-* Determine for each beam its position (Moment) relative to the current *beat*. For example in 4/4 time the first note in `r4 r32 a32[ a a ...` is 1/32 into the beat.
-* The *denominator* of this Moment is the *rhythmic_importance* of the stem, `32` in the above example. This works because `Moment` implicitly shortens, so 4/8 is automatically converted to 1/8 etc.
-* When the rhythmic importance is smaller than or equal to the denominator of `baseMoment` the stem is to the right of a subdivision, so we can store that information in the current beam info.  
-  Optionally it may make sense to store the information also in the stem to the left.
-* The nominal beam count for the subdivision can be calculated by `intlog2(rhythmic_imporance) - 2`, which is true for the left beamlets of the current stem and the right beamlets of the previous stem.
-* The position *on* the beat (determined by getting a Moment of 0 (I don't know what denominator the `Moment` object will then assume)) needs special consideration. In this case the rhythmic importance is determined by the *length* of the beat.  
-**TODO:** Reconsider this. In regular settings the  
-For regular beats this is pretty clear (e.g. a beat of 1/8 has an importance of 8). But for example, when 5/32 are grouped in 2+3 (baseMoment = 1/32, beatStructure = 2,3) the lengths of the beats are 2/32 (= 1/16) and 3/32. For both beats we will want a rhythmic importance of 1/16 (= 2 beams) because they are `>= 1/16 < 1/8`.  
-  To achieve that we shorten the fraction by 2 (and flooring the numerator each time) until the numerator becomes 1. The most efficient way to do that in a loop where both numerator and denominator are shifted right until the numerator is 1.
+Each subdivision has a nominal beam count that corresponds to the rhythmic importance of the stem and can be calculated by `intlog2(rhythmic_imporance) - 2`. The actual number of beams may be modified in a later stage, but for now we just make a note of this information. *(It has to be seen if we should actually store that in a stem property or if it's sufficient to calculate it later upon request.)*
+
+**Note:** For moments longer than 1/8 (i.e. `rhythmic_importance < 8`) this calculation will result in a nominal beam count of 0 or less. But at some point in the end of the process we will have to ensure that at least 1 beam is printed. Recall that we don't decide whether the notes are beamed at all (and 0 beams at a subdivision would actually break the beam).
+
+Stems *on* a beat are a corner case of this analysis and have to be treated specially. Their `Moment` relative to the beat is 0/1 (or 0), and their nominal beam count would be -2. Instead the nominal beam count of the subdivision on a beat is determined by the beat's *length*.  For durations different from 1/n we have to apply a special shortening operation that actually produces the *floor* of the matching duration. For example, in a 5/16 time with `baseMoment` 1/16 and `beatStructure` `#'(2 3)` the beats are 2/16 (= 1/8) and 3/16. But both beats have a `rhythmic_importance` of 8 because they are `>= 1/8 < 1/4`. To achieve that we shorten the fraction by 2 and floor the numerator in each iteration until the numerator becomes 1. The most efficient way to do that in a loop where both numerator and denominator are shifted right until the numerator is 1. The resulting denominator will be the `rhythmic_importance` of the beat's stem. *(NOTE: This functionality is already needed, so it is very likely that we can use the existing code.)*
 
 
-**Note:** *At the end* of the calculation we have to ensure that at least one beam is kept in place. When (manual) beams exceed a quarter note this calculation may lead to beam counts of <= 0, which is never intended when there is a beam in place (note that the actual choice of beaming has already been made when this code is executed).
+**Note:** Currently LilyPond actively checks for shortened beams and increases the count for subdivisions in the last beat of the beam. This is due to a misunderstanding of an ambiguous remark in “Behind Bars” (p. 156/57) which speaks of the “duration of the groups” and doesn't state what should be done when a group is shortened by a rest. However, Elaine Gould actually speaks of the duration of the *beat*, whether it is fully beamed or shortened by rests.
 
-**Note:** The above has been written without actual reference to the current code. Much of that may be reused as it is not completely wrong. But I wanted to have a fresh, conceptual look on the matter.
 
-##### When Encountering Tuplets
+#### Tuplets
 
 The code for handling tuplets has to be rewritten from scratch, as this is conceptually wrong in the existing code.
 
