@@ -35,36 +35,62 @@ I am not sure to what extent the handling of the finer details (treatment of dif
 
 ## Analysis
 
-#### Determine Subdivisions First
+### Determine Subdivisions
 
-I think the first step should be to determine the *positions* of subdivisions and then the number of nominal beams to be applied. I further suggest to store this information in the `Beam_rhythmic_element` object to the *right* of the subdivision (as that is the stem representing the metric position). Only later should we consider flag directions, invisible stems etc.
+In a first step we should determine the stems that represent subdivisions and the nominal beam count for that subdivision. Both values should be stored as properties of the stem to the right of the subdivision, as that is the one whose metric situation is responsible for subdivisions.
+
+Special concern is necessary when encountering tuplets, but this will be discussed in a later section.
+
+#### General Organization of a Beam
+
+A beam is part of a measure, and it is especially part of the `beatStructure`. *(NOTE: I'm not clear what happens when a beam crosses a barline).* The beat structure is based on `baseMoment` and consists of a sequence of beats/groups. Usually it is defined in the time signature but it can manually be overridden.^[For further details see [“Setting automatic beam behaviour”](http://lilypond.org/doc/v2.18/Documentation/notation/beams#setting-automatic-beam-behavior) in LilyPond's notation reference.] For example in 6/8 time `baseMoment` is 1/8, and the beat structure `#'(3 3)`, i.e. two groups/beats of three quavers each.
+
+##### baseMoment vs. subdivisionInterval
+
+Currently the `baseMoment` property is used to determine beam subdivisions, but this is not sufficient as there are cases where the subdivision interval must be different from `baseMoment`. This is most obvious in compound meters with differing denominators. For example in the compound time signature 2/4+5/32 `baseMoment` is 1/32 and `beatStructure` can be `#'(8 8 5)` (or also `#'(8 8 2 3)`). Of course it is useful to subdivide the 2/4 part with 1/8 or 1/16, but this is currently not possible: Fig. \ref{compound-meter} shows a reasonable rendering of that measure, subdivided by 1/16. (Probably it would be better to use 1/8 as interval in real scores, but this way is better for demonstration.)
+
+![Subdividing in compound meter (as most of the examples in this document this had to be created manually in an inacceptably tedious way)\label{compound-meter}](images/compound-meter.png)
+
+It is obvious that a new property `subdivisionInterval` has to be created that is independent from `baseMoment`. I suggest to make this an integer that corresponds to LilyPond's notion of durations. *(NOTE: this would limit beam subdivision to 1/x intervals and rule out values like 3/16. I'm not sure but doubt that's acceptable. So this has to be reconsidered, including its implications for the actual implementation.)* A convenience function `\subdivideBeams` should be added that accepts an integer or a boolean as argument and sets both context properties. `##f` would of course disable subdivision while `##t` might set it to the value of `baseMoment` (which would even make the new code more compatible with existing scores). It should be possible to encode the example with
+
+```lilypond
+\relative a' {
+  \compoundMeter #'((2 4) (5 32))
+  \set baseMoment = #(ly:make-moment 1/32)
+  \set beatStructure = #'(8 8 2 3)
+  \subdivideBeams 1/16
+  \repeat unfold 16 a32
+  \repeat unfold 5 a32
+}
+```
+
+and automatically get the displayed result. In more regular time signatures this will make the process even simpler, as currently one more or less always has to switch subdivisions on *and* change `baseMoment`. In a typical file it would simply look like this:
+
+```lilypond
+\relative a' {
+  \subdivideBeams 1/8
+  \repeat unfold 32 a32
+}
+```
+
+Reasonable presets for `subdivisionInterval` should be defined in the time signatures' `beamExceptions`.
+
+Separating `baseMoment` from `subdivisionInterval` has another implication that may be perceived as an additional complexity but actually matches musical reality. The length of a beat is defined as a multiple of `baseMoment`, so subdivisions always fit cleanly into a beat. This is no more the case when the interval is an independent value. In the previous example the subdivision of 1/16 does *not* fit into the last beat of 3/32. This means that *whenever* the beat length is not a multiple of `subdivisionInterval` there must be *no* subdivisions in the beat, even when a stem should fall on a multiple of the interval. This check is necessary to avoid wrong subdivision as in fig. \ref{remainder-subdivision}
+
+![Wrong subdivision in a 3/8 measure with `subdivisionInterval` 1/4\label{remainder-subdivision}](images/remainder-subdivision.png)
+
+
+
+#### General Identification of Subdivisions - `beamify` (Without Tuplets)
+
+This section describes the process of determining the nominal beam count for all stems in a beam when no tuplets are involved. The specifics of dealing with tuplets are discussed in the next section, while all further considerations regarding the actual *printed* left and right beamlets are discussed in a later part.
 
 ##### Some notes:
 
 * The remaining length of the beam should *never* be considered (as is currently in LilyPond (and also Dorico)). When a stem is shortened by rests the number of beams at prior subdivisions should *not* be increased.
 * Also we don't want to use the *absolute* position in the *measure*, since that may confuse the calculation with compound meters with differing denominators. Instead we always want to calculate the rhythmic importance relative to the current *beat*. (see code example after next item)
-* We need to add an additional property for the subdivision frequency because in some cases (especially compound time signatures) this *must* be independent from `baseMoment`. In the following example it makes sense to subdivide by 1/8 or 1/16, and this is currently not possible to implement because that time signature is only possible with `baseMoment = 1/32`:
 
-```lilypond
-     \relative a' {
-       \compoundMeter #'((2 4) (5 32))
-     % This doesn't work since we have to use 1/32 as baseMoment
-     % and therefore implies subdivision at that rate too
-     %  \set subdivideBeams = ##t
-       \set baseMoment = #(ly:make-moment 1/32)
-       \set beatStructure = #'(8 8 5)
-       \repeat unfold 16 a32
-       \repeat unfold 5 a32
-     }
-```
-
-* This separation adds another situation that has not been possible so far: the beat length may not be a multiple of the subdivision length. In the above example the third beat is 5/32 long. So when we subdivide by 1/8 or 1/16 the division doesn't fit into the beat without remainder. In this case the beat can't be subdivided at all. This has to be determined for each beat in the processing outlined below.
-* Separating `baseMoment` from subdivision length also makes it possible to provide reasonable presets for subdivisions in the `beamExceptions` for a given time signature. In fact I think this should be added, both as a property and to all defined preset time signatures.
-* If it is reasonably possible to implement the most natural way would be to use `subdivideBeams` for this. `\set subdivideBeams = 1/8` would then both switch the subdivision on and set the value. I'd say `\set subdivideBeams = 0` would then switch it off. That would also lend itself nicely to the `if` condition in C++.
-* Independently from how the subdivision interval is stored internally a practical interface would be a function
-    `subdivideBeams = #(define-void-function (ctx interval)((symbol? 'Score) moment-or-boolean?) ... )`. This makes it easy to switch subdivision on and off and at the same time define the interval. The optional `ctx` can limit the scope to specific contexts.
-
-##### How to do this in general (i.e. no tuplets involved)
+---
 
 * Iterate over the whole beam
 * Determine for each beam its position (Moment) relative to the current *beat*. For example in 4/4 time the first note in `r4 r32 a32[ a a ...` is 1/32 into the beat.
